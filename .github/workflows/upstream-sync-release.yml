@@ -1,0 +1,147 @@
+name: Sync upstream, build and release sys-patch
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+  push:
+    branches:
+      - HabilitarForwarders
+    paths:
+      - '.github/workflows/upstream-sync-release.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sys-patch-upstream-sync-and-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fast-forward master from impeeza/sys-patch
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      sha: ${{ steps.sync.outputs.sha }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout (with credentials for pushing master)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream and synchronize master
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/impeeza/sys-patch.git
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          git fetch --no-tags upstream +refs/heads/master:refs/remotes/upstream/master
+          previous="$(git rev-parse refs/remotes/origin/master)"
+          latest="$(git rev-parse refs/remotes/upstream/master)"
+          echo "sha=$latest" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${latest:0:8}" >> "$GITHUB_OUTPUT"
+          if [[ "$latest" == "$previous" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream master unchanged: $latest"
+          else
+            if ! git merge-base --is-ancestor "$previous" "$latest"; then
+              echo "::error::Local master diverged from upstream. Refusing to overwrite local history."
+              exit 1
+            fi
+            git push origin "$latest:refs/heads/master"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Updated master: $previous -> $latest"
+          fi
+
+  build:
+    name: Compile sysmodule and Tesla overlay
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Checkout synchronized master with libtesla
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build using upstream Makefile and devkitPro
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j2 dist
+
+      - name: Validate and package Switch SD files
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s sys-patch.zip
+          test -s out/atmosphere/contents/420000000000000B/exefs.nsp
+          test -s out/atmosphere/contents/420000000000000B/flags/boot2.flag
+          test -s out/switch/.overlays/sys-patch-overlay.ovl
+          version="$(sed -n 's/^export VERSION :=[[:space:]]*//p' Makefile | head -n 1 | tr -d '\r')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          name="sys-patch-v${version}-${{ needs.sync.outputs.short_sha }}.zip"
+          mv sys-patch.zip "$name"
+          unzip -t "$name" >/dev/null
+          sha256sum "$name" > "$name.sha256"
+          printf 'Upstream: https://github.com/impeeza/sys-patch\nCommit: %s\nVersion: %s\nToolchain: devkitpro/devkita64\n' \
+            '${{ needs.sync.outputs.sha }}' "$version" > BUILD-INFO.txt
+
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: sys-patch-release-files
+          path: |
+            sys-patch-v*.zip
+            sys-patch-v*.zip.sha256
+            BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: [sync, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built assets
+        uses: actions/download-artifact@v4
+        with:
+          name: sys-patch-release-files
+          path: ./release
+
+      - name: Publish compiled installation ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: autosync-v${{ needs.build.outputs.version }}-${{ needs.sync.outputs.short_sha }}
+          name: sys-patch v${{ needs.build.outputs.version }} (upstream ${{ needs.sync.outputs.short_sha }})
+          target_commitish: ${{ needs.sync.outputs.sha }}
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            Automatically synchronized from [impeeza/sys-patch](https://github.com/impeeza/sys-patch).
+            
+            Upstream commit: \`${{ needs.sync.outputs.sha }}\`
+            Source branch: \`master\`
+            Built with \`devkitpro/devkita64\` and upstream \`make dist\`.
+            
+            Download the ZIP and extract its contents to the root of the Switch SD card.
+            Includes the Atmosphere sysmodule (exefs.nsp) and Tesla overlay (.ovl).
+            SHA-256 checksum is attached. These are automatically built community binaries, not an official upstream release.
+          files: |
+            release/sys-patch-v*.zip
+            release/sys-patch-v*.zip.sha256
+            release/BUILD-INFO.txt
