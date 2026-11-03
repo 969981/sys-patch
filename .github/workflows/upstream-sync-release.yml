@@ -86,7 +86,7 @@ jobs:
           set -euo pipefail
           test -s sys-patch.zip
           test -s out/atmosphere/contents/420000000000000B/exefs.nsp
-          test -s out/atmosphere/contents/420000000000000B/flags/boot2.flag
+          test -f out/atmosphere/contents/420000000000000B/flags/boot2.flag
           test -s out/switch/.overlays/sys-patch-overlay.ovl
           version="$(sed -n 's/^export VERSION :=[[:space:]]*//p' Makefile | head -n 1 | tr -d '\r')"
           test -n "$version"
@@ -134,9 +134,9 @@ jobs:
           body: |
             Automatically synchronized from [impeeza/sys-patch](https://github.com/impeeza/sys-patch).
             
-            Upstream commit: \`${{ needs.sync.outputs.sha }}\`
-            Source branch: \`master\`
-            Built with \`devkitpro/devkita64\` and upstream \`make dist\`.
+            Upstream commit: `${{ needs.sync.outputs.sha }}`
+            Source branch: `master`
+            Built with `devkitpro/devkita64` and upstream `make dist`.
             
             Download the ZIP and extract its contents to the root of the Switch SD card.
             Includes the Atmosphere sysmodule (exefs.nsp) and Tesla overlay (.ovl).
